@@ -1,177 +1,164 @@
-'use strict';
+var recorderApp = angular.module('recorder', []);
 
-angular.module('audioRecordingApp')
-  .controller('RecordCtrl', function ($scope, recorder, $timeout) {
-    //Generate a graph (https://developer.mozilla.org/en-US/docs/Web/API/AudioContext)
-    var audioContext = new AudioContext();
-    var audioInput = null,
-      realAudioInput = null,
-      inputPoint = null,
-      audioRecorder = null;
-    var rafID = null;
-    var analyserContext = null;
-    var canvasWidth, canvasHeight;
-    var recIndex = 0;
-    var time = 0;
-    $scope.recording = true;
+recorderApp
+  .config([
+    '$compileProvider',
+    function ($compileProvider) {
+      $compileProvider.aHrefSanitizationWhitelist(/^\s*(https?|ftp|mailto|chrome-extension|data):/);
+    }
+  ]);
 
+recorderApp.controller('RecorderController', ['$scope', '$sce', '$timeout', function ($scope, $sce, $timeout) {
+  $scope.trustSrc = function (src) {
+    return $sce.trustAsResourceUrl(src);
+  };
+  $scope.stream = null;
+  $scope.recording = false;
+  $scope.encoder = null;
+  $scope.ws = null;
+  $scope.input = null;
+  $scope.node = null;
+  $scope.samplerate = 22050;
+  $scope.samplerates = [8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000];
+  $scope.bitrate = 64;
+  $scope.bitrates = [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, 320];
+  $scope.recordings = [];
+  $scope.test = 0;
+  $scope.server = false;
+  $scope.time = 0;
+  $scope.printTime = '';
+  var buffer = new Uint8Array();
 
-    $scope.init = function () {
+  var _appendBuffer = function (buffer1, buffer2) {
+    var tmp = new Uint8Array(buffer1.byteLength + buffer2.byteLength);
+    tmp.set(new Uint8Array(buffer1), 0);
+    tmp.set(new Uint8Array(buffer2), buffer1.byteLength);
+    return tmp.buffer;
+  };
 
-      //Check if browser suport  Wep Audio API
-      navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia || navigator.mediaDevices.getUserMedia;
-      navigator.cancelAnimationFrame = navigator.cancelAnimationFrame || navigator.webkitCancelAnimationFrame || navigator.mozCancelAnimationFrame;
-      navigator.requestAnimationFrame = navigator.requestAnimationFrame || navigator.webkitRequestAnimationFrame || navigator.mozRequestAnimationFrame;
+  $scope.startRecording = function () {
+    if ($scope.recording)
+      return;
+    console.log('start recording');
+    $scope.encoder = new Worker('scripts/worker/encoder.js');
+    console.log('initializing encoder with samplerate = ' + $scope.samplerate + ' and bitrate = ' + $scope.bitrate);
+    $scope.encoder.postMessage({cmd: 'init', config: {samplerate: $scope.samplerate, bitrate: $scope.bitrate}});
 
-      //Ask for access to microphone (https://developer.mozilla.org/en-US/docs/Web/API/Navigator/getUserMedia)
-      navigator.getUserMedia(
-        {
-          "audio": {
-            "mandatory": {
-              "googEchoCancellation": "false",
-              "googAutoGainControl": "false",
-              "googNoiseSuppression": "false",
-              "googHighpassFilter": "false"
-            },
-            "optional": []
-          }
-        }, $scope.gotStream, function (e) {
-          alert('Error getting audio');
-          console.log(e);
+    $scope.encoder.onmessage = function (e) {
+      //$scope.ws.send(e.data.buf);
+      buffer = _appendBuffer(buffer, e.data.buf);
+      if (e.data.cmd == 'end') {
+        //$scope.ws.close();
+        //$scope.ws = null;
+        $scope.encoder.terminate();
+        $scope.encoder = null;
+
+        $scope.time = 0;
+
+        $scope.recordings.push({
+          url: 'data:audio/mp3;base64,' + encode64(buffer),
+          name: 'audio_recording_' + new Date().getTime() + '.mp3'
         });
-    };
+        buffer = new Uint8Array();
 
-    $scope.gotStream = function (stream) {
-
-      inputPoint = audioContext.createGain();
-
-      realAudioInput = audioContext.createMediaStreamSource(stream);
-      audioInput = realAudioInput;
-      audioInput.connect(inputPoint);
-
-
-//    audioInput = convertToMono( input );
-
-      $scope.analyserNode = audioContext.createAnalyser();
-      $scope.analyserNode.fftSize = 2048;
-      inputPoint.connect( $scope.analyserNode );
-
-      audioRecorder = new recorder.Recorder( inputPoint );
-
-      $scope.zeroGain = audioContext.createGain();
-      $scope.zeroGain.gain.value = 0.0;
-      inputPoint.connect( $scope.zeroGain );
-      $scope.zeroGain.connect( audioContext.destination );
-    };
-
-    $scope.updateAnalysers = function(state) {
-      if (!analyserContext) {
-        var canvas = document.getElementById("analyser");
-        canvasWidth = canvas.width;
-        canvasHeight = canvas.height;
-        analyserContext = canvas.getContext('2d');
-      }
-
-      // analyzer draw code here
-      {
-        var SPACING = 3;
-        var BAR_WIDTH = 1;
-        var numBars = Math.round(canvasWidth / SPACING);
-        var freqByteData = new Uint8Array($scope.analyserNode.frequencyBinCount);
-
-        $scope.analyserNode.getByteFrequencyData(freqByteData);
-
-        analyserContext.clearRect(0, 0, canvasWidth, canvasHeight);
-        analyserContext.fillStyle = '#F6D565';
-        analyserContext.lineCap = 'round';
-        var multiplier = $scope.analyserNode.frequencyBinCount / numBars;
-
-        // Draw rectangle for each frequency bin.
-        for (var i = 0; i < numBars; ++i) {
-          var magnitude = 0;
-          var offset = Math.floor( i * multiplier );
-          // gotta sum/average the block, or we miss narrow-bandwidth spikes
-          for (var j = 0; j< multiplier; j++)
-            magnitude += freqByteData[offset + j];
-          magnitude = magnitude / multiplier;
-          var magnitude2 = freqByteData[i * multiplier];
-          analyserContext.fillStyle = "hsl( " + Math.round((i*360)/numBars) + ", 100%, 50%)";
-          analyserContext.fillRect(i * SPACING, canvasHeight, BAR_WIDTH, -magnitude);
-        }
-      }
-
-      rafID = window.requestAnimationFrame( $scope.updateAnalysers );
-    };
-
-    $scope.cancelAnalyserUpdates = function () {
-      window.cancelAnimationFrame( rafID );
-      rafID = null;
-    };
-
-    $scope.doneEncoding = function( blob ) {
-      audioRecorder.setupDownload( blob, "myRecording" + ((recIndex<10)?"0":"") + recIndex + ".wav" );
-      recIndex++;
-    };
-
-    $scope.gotBuffers = function( buffers ) {
-      var canvas = document.getElementById( "wavedisplay" );
-      drawBuffer( canvas.width, canvas.height, canvas.getContext('2d'), buffers[0] );
-      audioRecorder.exportMonoWAV( $scope.doneEncoding );
-    };
-
-    $scope.beginRecording = function () {
-      $scope.recording = !$scope.recording;
-      if ($scope.recording) {
-        $scope.cancelAnalyserUpdates();
-        audioRecorder.stop();
-        audioRecorder.getBuffers( $scope.gotBuffers );
-
+        $scope.$apply();
       } else {
-        time = 0;
         $timeout(updateTime, 100);
-        $scope.updateAnalysers();
-        audioRecorder.clear();
-        audioRecorder.record();
       }
     };
+
+    //This can be used with a WebSocket
+    //$scope.ws = new WebSocket("ws://" + window.location.host + "/ws/audio");
+    //$scope.ws.onopen = function() {
+    $scope.initializeMedia();
+    //};
+
+    function encode64(buffer) {
+      var binary = '',
+        bytes = new Uint8Array(buffer),
+        len = bytes.byteLength;
+
+      for (var i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return window.btoa(binary);
+    }
 
     function convertTime(millseconds) {
       var seconds = Math.floor(millseconds / 1000);
+      var roundSeconds = seconds % 60;
       var days = Math.floor(seconds / 86400);
       var hours = Math.floor((seconds % 86400) / 3600);
       var minutes = Math.floor(((seconds % 86400) % 3600) / 60);
       var timeString = '';
-      if(days > 0) timeString += (days > 1) ? (days + " days ") : (days + " day ");
-      if(hours > 0) timeString += (hours > 1) ? (hours + " hours ") : (hours + " hour ");
-      if(minutes >= 0) timeString += (minutes > 1) ? (minutes + " minutes ") : (minutes + " minute ");
-      if(seconds >= 0) timeString += (seconds > 1) ? (seconds + " seconds ") : (minutes + " second ");
+      if (days > 0) timeString += (days > 1) ? (days + " days ") : (days + " day ");
+      if (hours > 0) timeString += (hours > 1) ? (hours + " hours ") : (hours + " hour ");
+      if (minutes >= 0) timeString += (minutes > 1) ? (minutes + " minutes ") : (minutes + " minute ");
+      if (roundSeconds >= 0) timeString += (roundSeconds > 1) ? (roundSeconds + " seconds ") : (roundSeconds + " second ");
       return timeString;
     }
 
-    function updateTime (){
-      time += 100;
-      $scope.printTime = convertTime(time);
-      !$scope.recording && $timeout(updateTime, 100);
+    function updateTime() {
+        $scope.time += 100;
+        $scope.printTime = convertTime($scope.time);
     }
 
-    function drawBuffer( width, height, context, data ) {
-      var step = Math.ceil( data.length / width );
-      var amp = height / 2;
-      context.fillStyle = "silver";
-      context.clearRect(0,0,width,height);
-      for(var i=0; i < width; i++){
-        var min = 1.0;
-        var max = -1.0;
-        for (var j=0; j<step; j++) {
-          var datum = data[(i*step)+j];
-          if (datum < min)
-            min = datum;
-          if (datum > max)
-            max = datum;
-        }
-        context.fillRect(i,(1+min)*amp,1,Math.max(1,(max-min)*amp));
-      }
-    }
+  };
 
-    $scope.init();
-  });
+  $scope.userMediaFailed = function (code) {
+    console.log('grabbing microphone failed: ' + code);
+    alert('To record we need access to your microphone');
+  };
+
+  $scope.initializeMedia = function () {
+    navigator.getUserMedia = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+    if (!navigator.getUserMedia) {
+      alert('You\'re browser doesn\'t support recording');
+    } else {
+      navigator.getUserMedia({video: false, audio: true}, $scope.gotUserMedia, $scope.userMediaFailed);
+    }
+  };
+
+  $scope.gotUserMedia = function (localMediaStream) {
+    $scope.recording = true;
+    $scope.recordButtonStyle = '';
+
+    console.log('success grabbing microphone');
+    $scope.stream = localMediaStream;
+
+    var audio_context = new window.AudioContext();
+
+    $scope.input = audio_context.createMediaStreamSource($scope.stream);
+    $scope.node = $scope.input.context.createScriptProcessor(4096, 1, 1);
+
+    console.log('sampleRate: ' + $scope.input.context.sampleRate);
+
+    $scope.node.onaudioprocess = function (e) {
+      if (!$scope.recording)
+        return;
+      var channelLeft = e.inputBuffer.getChannelData(0);
+      $scope.encoder.postMessage({cmd: 'encode', buf: channelLeft});
+    };
+
+    $scope.input.connect($scope.node);
+    $scope.node.connect(audio_context.destination);
+
+    $scope.$apply();
+  };
+
+  $scope.stopRecording = function () {
+    if (!$scope.recording) {
+      return;
+    }
+    console.log('stop recording');
+    $scope.stream.stop();
+    $scope.recording = false;
+    $scope.encoder.postMessage({cmd: 'finish'});
+
+    $scope.input.disconnect();
+    $scope.node.disconnect();
+    $scope.input = $scope.node = null;
+  };
+
+}]);
+

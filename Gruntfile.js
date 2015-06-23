@@ -174,7 +174,14 @@ module.exports = function (grunt) {
         }]
       }
     },
+    websocket: {
+      options: {
+        port: 1337,
+        handler: 'websocket/websocket.js'
 
+      },
+      target: {}
+    },
     // Automatically inject Bower components into the app
     wiredep: {
       app: {
@@ -398,6 +405,7 @@ module.exports = function (grunt) {
     grunt.task.run([
       'clean:server',
       'wiredep',
+      //'websocket',
       'concurrent:server',
       'autoprefixer:server',
       'connect:livereload',
